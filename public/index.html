@@ -6,6 +6,7 @@
 <title>Comp Report Builder</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
 <style>
   :root { --bg:#f6f7f9; --card:#fff; --ink:#1b2430; --muted:#667085; --line:#e3e6eb; --accent:#1f6f4a; }
   @media (prefers-color-scheme: dark) { :root { --bg:#14181d; --card:#1c222a; --ink:#e8ecf1; --muted:#9aa5b4; --line:#2c3440; --accent:#3fb37f; } }
@@ -18,17 +19,18 @@
   label { display:block; font-size:.8rem; color:var(--muted); margin-bottom:4px; }
   input, select { width:100%; padding:9px; border:1px solid var(--line); border-radius:6px; background:var(--bg); color:var(--ink); font:inherit; }
   button { padding:10px 16px; border:0; border-radius:6px; background:var(--accent); color:#fff; font:inherit; cursor:pointer; }
-  button.secondary { background:transparent; color:var(--ink); border:1px solid var(--line); }
   button:disabled { opacity:.5; cursor:wait; }
   .row { display:flex; gap:8px; flex-wrap:wrap; align-items:end; }
   .row > .grow { flex:1; min-width:220px; }
   table { width:100%; border-collapse:collapse; font-size:.9rem; }
   th, td { text-align:left; padding:8px 6px; border-bottom:1px solid var(--line); }
   td input { padding:5px; }
-  .summary { font-size:1.05rem; line-height:1.6; }
+  .summary { font-size:1.05rem; line-height:1.6; margin-bottom:10px; }
   .msg { color:var(--muted); margin:8px 0; }
   .err { color:#c0392b; }
   .scroll { overflow-x:auto; }
+  details { margin-top:14px; border-top:1px solid var(--line); padding-top:12px; }
+  summary { cursor:pointer; font-weight:bold; }
 </style>
 </head>
 <body>
@@ -36,6 +38,10 @@
   <h1>Comp Report Builder</h1>
 
   <div class="card">
+    <div style="margin-bottom:14px">
+      <label>Load a previous report (a PDF made by this app) to refill the form</label>
+      <input id="pdfIn" type="file" accept="application/pdf">
+    </div>
     <div class="row">
       <div class="grow"><label>Property address</label><input id="address" placeholder="123 Main St, Springfield, MO 65801"></div>
       <button id="lookup">Look up</button>
@@ -55,6 +61,18 @@
         <select id="garageType"><option value="">n/a</option><option>Attached</option><option>Detached</option><option>Carport</option></select></div>
       <div><label>Asking price (optional)</label><input id="ask" type="number"></div>
     </div>
+
+    <details open>
+      <summary>Cost-approach inputs (used only when fewer than 3 sold comps are found)</summary>
+      <div class="grid" style="margin-top:10px">
+        <div><label>New build cost per sq ft ($), your market</label><input id="costPerSqft" type="number" placeholder="e.g. your local figure"></div>
+        <div><label>Depreciation per year of age (%)</label><input id="deprRate" type="number" step="0.1" value="1.5"></div>
+        <div><label>Land value + garage/extras ($)</label><input id="landValue" type="number"></div>
+        <div><label>County assessment ratio (%)</label><input id="assessRatio" type="number" step="0.1" value="100"></div>
+      </div>
+      <p class="msg">Estimate = (sq ft × cost per sq ft) − depreciation (age × rate, capped at 60%) + land/extras. Land value fills in from the county's tax assessment when the lookup finds one. Assessments are often a percentage of market value, so set the ratio to match your county (100 if it assesses at full value) and check the figure. Cost per sq ft starts from the published state average when the lookup finds the property's state. Type your own figure to replace it; a figure you type is remembered on this device.<br><span id="costSrc"></span></p>
+    </details>
+
     <div class="row" style="margin-top:14px">
       <button id="findComps">Find 5 comps</button>
     </div>
@@ -62,8 +80,8 @@
 
   <div class="card" id="results" hidden>
     <div class="summary" id="summary"></div>
-    <div class="scroll"><table id="compTable"></table></div>
-    <p class="msg">Sold prices are editable. If a comp looks wrong, fix its price or clear the row, and the average updates.</p>
+    <div class="scroll" id="tableWrap"><table id="compTable"></table></div>
+    <p class="msg" id="tableNote">Sold prices are editable. If a comp looks wrong, fix its price or clear the row, and the result updates.</p>
     <div class="row"><button id="pdf">Download PDF</button></div>
   </div>
   <p class="msg err" id="err"></p>
@@ -71,10 +89,18 @@
 
 <script>
 const $ = (id) => document.getElementById(id);
-let subject = {}, comps = [];
+let subject = {}, comps = [], meta = null, landAuto = false, costAuto = false;
+// Average new-construction cost per sq ft by state, "standard finish", excluding land, permits and site work.
+// Source: costtobuildhouse.com "House Building Cost Per Square Foot - All 50 States" (2026, listed as RSMeans-based). Starting point only.
+const COST_BY_STATE = {AL:89,AK:173,AZ:121,AR:90,CA:200,CO:137,CT:172,DE:158,FL:122,GA:110,HI:263,ID:115,IL:151,IN:113,IA:116,KS:111,KY:110,LA:112,ME:146,MD:153,MA:190,MI:125,MN:134,MS:90,MO:110,MT:121,NE:111,NV:134,NH:147,NJ:183,NM:116,NY:199,NC:113,ND:115,OH:120,OK:105,OR:146,PA:141,RI:175,SC:112,SD:113,TN:109,TX:112,UT:121,VT:150,VA:128,WA:174,WV:116,WI:120,WY:114};
+const TAG = "COMPDATA1:";
+const b64enc = (o) => btoa(unescape(encodeURIComponent(JSON.stringify(o))));
+const b64dec = (t) => JSON.parse(decodeURIComponent(escape(atob(t))));
+if (window.pdfjsLib) pdfjsLib.GlobalWorkerOptions.workerSrc = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
 
 const money = (n) => (n == null || isNaN(n)) ? "—" : "$" + Math.round(n).toLocaleString();
 const num = (n) => (n == null || n === "") ? "—" : Number(n).toLocaleString();
+const MAX_DEPR = 0.6;
 
 async function api(body) {
   let r;
@@ -106,6 +132,43 @@ function readSubject() {
   };
 }
 
+/* ---- remembered cost inputs (cost/sq ft and depreciation rate only) ---- */
+const KEEP = ["costPerSqft", "deprRate", "assessRatio"], KEY = "compCostInputs";
+try {
+  const v = JSON.parse(localStorage.getItem(KEY) || "{}");
+  KEEP.forEach(id => { if (v[id] != null && v[id] !== "") $(id).value = v[id]; });
+} catch (e) {}
+["costPerSqft", "deprRate", "landValue", "assessRatio"].forEach(id => $(id).addEventListener("input", () => {
+  if (id === "landValue") landAuto = false;
+  if (id === "costPerSqft") { costAuto = false; $("costSrc").textContent = ""; }
+  if (id === "assessRatio" && landAuto && subject.assessedLand != null) autoLand(subject, true);
+  try { localStorage.setItem(KEY, JSON.stringify(Object.fromEntries(KEEP.map(i => [i, (i === "costPerSqft" && costAuto) ? "" : $(i).value])))); } catch (e) {}
+  if (meta) renderSummaryOnly();
+}));
+
+function autoCost(p) {
+  const c = COST_BY_STATE[(p.state || "").toUpperCase()];
+  if (!c) return;
+  if ($("costPerSqft").value !== "" && !costAuto) return; // never overwrite a figure the user typed
+  $("costPerSqft").value = c; costAuto = true;
+  $("costSrc").textContent = `Filled from the ${p.state.toUpperCase()} state average ($${c}/sq ft, published 2026 figure, standard finish, excludes land). Replace it with your local figure if you know it.`;
+}
+function autoLand(p, overwrite) {
+  if (p.assessedLand == null) return;
+  if (!overwrite && $("landValue").value !== "" && !landAuto) return;
+  const ratio = (+$("assessRatio").value || 100) / 100;
+  $("landValue").value = Math.round(p.assessedLand / ratio);
+  landAuto = true;
+}
+function assessedRef() {
+  const s = subject;
+  if (s.assessedLand == null && s.assessedImprovements == null) return "";
+  const ratio = (+$("assessRatio").value || 100) / 100;
+  const land = (s.assessedLand || 0) / ratio, imp = (s.assessedImprovements || 0) / ratio;
+  return `County assessment${s.assessedYear ? " (" + s.assessedYear + ")" : ""}, adjusted for a ${(ratio * 100).toFixed(0)}% ratio: land ${money(land)} + improvements ${money(imp)} = ${money(land + imp)}. Reference only.`;
+}
+
+/* ---- lookup ---- */
 let lookedUpFor = "", busy = false;
 async function doLookup(overwrite) {
   const address = $("address").value.trim();
@@ -127,6 +190,8 @@ async function doLookup(overwrite) {
     fill("foundation", f.includes("base") ? "Basement" : f.includes("crawl") ? "Crawl Space" : f.includes("slab") ? "Slab" : "", "");
     fill("garage", p.garage ? "yes" : "no", "no");
     fill("garageType", ["Attached","Detached","Carport"].find(t => (p.garageType||"").toLowerCase().includes(t.toLowerCase())) || "", "");
+    autoLand(p, overwrite);
+    autoCost(p);
     $("lookupMsg").textContent = "Found. Check the fields and fill in anything missing (basement size is usually not in public data).";
   } catch (e) { $("lookupMsg").textContent = ""; $("err").textContent = e.message; }
   $("lookup").disabled = false; busy = false;
@@ -137,19 +202,22 @@ $("address").addEventListener("change", () => { const a = $("address").value.tri
 
 $("findComps").onclick = async () => {
   $("err").textContent = "";
-  if ($("address").value.trim() && $("address").value.trim() !== lookedUpFor) await doLookup(false);
+  if ($("address").value.trim() && $("address").value.trim() !== lookedUpFor) {
+    await doLookup(false);
+    if ($("address").value.trim() !== lookedUpFor) subject = {}; // lookup failed: don't reuse the old property's location
+  }
   const s = readSubject();
   if (!s.address) { $("err").textContent = "Enter an address."; return; }
   $("findComps").disabled = true; $("findComps").textContent = "Searching…";
   try {
     const r = await api({ action: "comps", subject: s });
-    subject = s; comps = r.comps;
-    if (!comps.length) $("err").textContent = "No recent sold comps found nearby.";
+    subject = s; comps = r.comps; meta = r;
     render();
   } catch (e) { $("err").textContent = e.message; }
   $("findComps").disabled = false; $("findComps").textContent = "Find 5 comps";
 };
 
+/* ---- math ---- */
 function stats() {
   const prices = comps.map(c => +c.soldPrice).filter(Boolean);
   const avg = prices.length ? prices.reduce((a,b)=>a+b,0)/prices.length : null;
@@ -158,26 +226,83 @@ function stats() {
   return { avg, n: prices.length, ppsf };
 }
 
-function render() {
-  if (!comps.length) { $("results").hidden = true; return; }
-  $("results").hidden = false;
+function costApproach(s) {
+  const cps = +$("costPerSqft").value || 0;
+  const rate = ($("deprRate").value === "" ? 1.5 : +$("deprRate").value) / 100;
+  const land = +$("landValue").value || 0;
+  const missing = [];
+  if (!s.sqft) missing.push("sq ft");
+  if (!s.yearBuilt) missing.push("year built");
+  if (!cps) missing.push("new build cost per sq ft");
+  if (missing.length) return { missing };
+  const age = Math.max(new Date().getFullYear() - s.yearBuilt, 0);
+  const depr = Math.min(age * rate, MAX_DEPR);
+  const rcn = s.sqft * cps;
+  return { age, rate, depr, rcn, deprAmt: rcn * depr, land, cps, value: rcn * (1 - depr) + land };
+}
+
+function valuation() {
   const st = stats();
-  let html = `<b>Average sold price (${st.n} comps): ${money(st.avg)}</b>`;
-  if (st.ppsf && subject.sqft) html += `<br>Avg $/sq ft: ${money(st.ppsf)} → implied value at ${num(subject.sqft)} sq ft: ${money(st.ppsf * subject.sqft)}`;
-  if (subject.ask && st.avg) {
-    const diff = subject.ask - st.avg;
-    html += `<br>Asking ${money(subject.ask)} is ${money(Math.abs(diff))} (${Math.abs(diff / st.avg * 100).toFixed(1)}%) ${diff > 0 ? "above" : "below"} the comp average.`;
+  if (st.n >= 3) return { kind: "comps", st, value: st.avg };
+  const ca = costApproach(subject);
+  return { kind: "cost", st, ca, value: ca && !ca.missing ? ca.value : null };
+}
+
+function searchNote() {
+  if (!meta) return "";
+  let t = `Searched sales within the last ${meta.searchedMonths} months and ${meta.searchedRadius} miles.`;
+  if (meta.searchedMonths > 12) t += " (Widened from 12 months because there were too few recent sales.)";
+  return t;
+}
+function diagText() {
+  const d = meta && meta.diag;
+  if (!d) return "";
+  return `${d.properties} properties checked within ${d.radiusMiles} miles, ${d.withSalePrice} with a sale price on record, ${d.inWindow} sold in the last ${meta.searchedMonths} months.`;
+}
+function askLine(ask, value, what) {
+  if (!ask || !value) return "";
+  const diff = ask - value;
+  return `Asking ${money(ask)} is ${money(Math.abs(diff))} (${Math.abs(diff / value * 100).toFixed(1)}%) ${diff > 0 ? "above" : "below"} the ${what}.`;
+}
+
+/* ---- render ---- */
+function render() {
+  if (!meta) { $("results").hidden = true; return; }
+  $("results").hidden = false;
+  const v = valuation(), st = v.st;
+  let html = "";
+  if (v.kind === "comps") {
+    html += `<b>Average sold price (${st.n} comps): ${money(st.avg)}</b>`;
+    if (st.ppsf && subject.sqft) html += `<br>Avg $/sq ft: ${money(st.ppsf)} → implied value at ${num(subject.sqft)} sq ft: ${money(st.ppsf * subject.sqft)}`;
+    const a = askLine(subject.ask, st.avg, "comp average"); if (a) html += `<br>${a}`;
+    html += `<br><span class="msg">${searchNote()}</span>`;
+  } else {
+    html += `<b>Not enough sold comps to average (${st.n} found).</b><br><span class="msg">${searchNote()} ${diagText()}</span><br>`;
+    const ca = v.ca;
+    if (ca.missing) {
+      html += `To get a cost-approach estimate instead, enter: ${ca.missing.join(", ")}. This updates automatically.`;
+    } else {
+      html += `<b>Cost-approach estimate: ${money(ca.value)}</b><br>` +
+        `Replacement cost new: ${money(ca.rcn)} (${num(subject.sqft)} sq ft × ${money(ca.cps)})<br>` +
+        `Less depreciation: ${money(ca.deprAmt)} (${ca.age} yrs × ${(ca.rate * 100).toFixed(1)}% = ${(ca.depr * 100).toFixed(0)}%, capped at ${MAX_DEPR * 100}%)<br>` +
+        `Plus land/extras: ${money(ca.land)}` + (ca.land ? "" : " <span class='msg'>(none entered, so this is building value only)</span>");
+      const a = askLine(subject.ask, ca.value, "cost-approach estimate"); if (a) html += `<br>${a}`;
+    }
+    const ar = assessedRef(); if (ar) html += `<br><span class="msg">${ar}</span>`;
   }
   $("summary").innerHTML = html;
-  $("compTable").innerHTML = `<tr><th>Address</th><th>Sold</th><th>Sq ft</th><th>Yr built</th><th>Bd/Ba</th><th>Garage</th><th>Dist.</th><th>Sold price</th></tr>` +
-    comps.map((c, i) => `<tr><td>${c.address}</td><td>${(c.soldDate||"").slice(0,10)}</td><td>${num(c.sqft)}</td><td>${c.yearBuilt ?? "—"}</td>
-      <td>${c.beds ?? "—"}/${c.baths ?? "—"}</td><td>${c.garage ? (c.garageType || "Yes") : "No"}</td><td>${c.miles} mi</td>
-      <td><input type="number" value="${c.soldPrice || ""}" data-i="${i}" style="width:110px"></td></tr>`).join("");
-  document.querySelectorAll("#compTable input").forEach(inp => inp.oninput = () => {
-    comps[+inp.dataset.i].soldPrice = +inp.value || null;
-    const s2 = stats();
-    renderSummaryOnly();
-  });
+
+  $("tableWrap").hidden = !comps.length; $("tableNote").hidden = !comps.length;
+  if (comps.length) {
+    $("compTable").innerHTML = `<tr><th>Address</th><th>Sold</th><th>Sq ft</th><th>Yr built</th><th>Bd/Ba</th><th>Garage</th><th>Dist.</th><th>Sold price</th></tr>` +
+      comps.map((c, i) => `<tr><td>${c.address}</td><td>${(c.soldDate||"").slice(0,10)}</td><td>${num(c.sqft)}</td><td>${c.yearBuilt ?? "—"}</td>
+        <td>${c.beds ?? "—"}/${c.baths ?? "—"}</td><td>${c.garage ? (c.garageType || "Yes") : "No"}</td><td>${c.miles} mi</td>
+        <td><input type="number" value="${c.soldPrice || ""}" data-i="${i}" style="width:110px"></td></tr>`).join("");
+    document.querySelectorAll("#compTable input").forEach(inp => inp.oninput = () => {
+      comps[+inp.dataset.i].soldPrice = +inp.value || null;
+      renderSummaryOnly();
+    });
+  }
 }
 function renderSummaryOnly() {
   const keep = [...document.querySelectorAll("#compTable input")].map(i => i.value);
@@ -185,17 +310,82 @@ function renderSummaryOnly() {
   document.querySelectorAll("#compTable input").forEach((inp, i) => inp.value = keep[i]);
 }
 
+/* ---- load a previous report ---- */
+async function parseReportText(pdf) {
+  const page = await pdf.getPage(1);
+  const tc = await page.getTextContent();
+  const items = tc.items.map(i => (i.str || "").trim()).filter(Boolean);
+  if (items.indexOf("Subject Property") < 0) return null;
+  const get = (label) => { const i = items.indexOf(label); return i >= 0 ? (items[i + 1] || "") : ""; };
+  const n = (t) => { const x = parseFloat(String(t).replace(/[^0-9.]/g, "")); return isNaN(x) ? null : x; };
+  const address = get("Address"); if (!address) return null;
+  const bb = get("Bedrooms / Baths").split("/").map(n);
+  const fd = get("Basement / crawl");
+  const fm = ["Basement", "Crawl Space", "Slab"].find(x => fd.toLowerCase().startsWith(x.toLowerCase()));
+  const fs = fd.match(/\(([\d,]+) sq ft\)/);
+  const g = get("Garage");
+  const roof = get("Roof type");
+  return { v: 0, subject: {
+    address, sqft: n(get("Sq ft")), yearBuilt: n(get("Year built")), beds: bb[0] ?? null, baths: bb[1] ?? null,
+    roofType: roof === "—" ? "" : roof, foundation: fm || "", foundationSqft: fs ? n(fs[1]) : null,
+    garage: !!g && g !== "No garage" && g !== "—", garageType: ["Attached", "Detached", "Carport"].includes(g) ? g : "",
+    ask: n(get("Asking price")),
+  }, cost: {} };
+}
+
+function applyLoaded(d) {
+  const s = d.subject || {}, c = d.cost || {};
+  const set = (id, v) => { $(id).value = v == null ? "" : v; };
+  set("address", s.address); set("sqft", s.sqft); set("yearBuilt", s.yearBuilt); set("beds", s.beds); set("baths", s.baths);
+  set("roof", s.roofType); set("foundationSqft", s.foundationSqft); set("ask", s.ask);
+  $("foundation").value = ["Basement", "Crawl Space", "Slab"].includes(s.foundation) ? s.foundation : "";
+  $("garage").value = s.garage ? "yes" : "no";
+  $("garageType").value = ["Attached", "Detached", "Carport"].includes(s.garageType) ? s.garageType : "";
+  if (c.costPerSqft !== undefined && c.costPerSqft !== "") set("costPerSqft", c.costPerSqft);
+  if (c.deprRate !== undefined && c.deprRate !== "") set("deprRate", c.deprRate);
+  if (c.assessRatio !== undefined && c.assessRatio !== "") set("assessRatio", c.assessRatio);
+  set("landValue", c.landValue); landAuto = !!c.landAuto;
+  costAuto = !!c.costAuto && !!$("costPerSqft").value;
+  $("costSrc").textContent = costAuto ? `Filled from the ${(s.state || "state").toUpperCase()} state average. Replace it with your local figure if you know it.` : "";
+  subject = { ...s };
+  lookedUpFor = (s.address || "").trim();
+  comps = []; meta = null; render();
+  $("lookupMsg").textContent = "Loaded from the PDF. Change anything you like, then click Find 5 comps to run a new search.";
+  window.scrollTo({ top: 0, behavior: "smooth" });
+}
+
+$("pdfIn").addEventListener("change", async (e) => {
+  const f = e.target.files[0]; if (!f) return;
+  $("err").textContent = "";
+  try {
+    if (!window.pdfjsLib) throw new Error("The PDF reader didn't load. Check your connection and reload the page.");
+    const pdf = await pdfjsLib.getDocument({ data: new Uint8Array(await f.arrayBuffer()) }).promise;
+    let data = null;
+    try {
+      const md = await pdf.getMetadata();
+      const kw = (md.info && md.info.Keywords) || "";
+      if (kw.startsWith(TAG)) data = b64dec(kw.slice(TAG.length));
+    } catch (err) {}
+    if (!data) data = await parseReportText(pdf);
+    if (!data) throw new Error("That PDF doesn't look like a report made by this app.");
+    applyLoaded(data);
+  } catch (err) { $("err").textContent = err.message; }
+  e.target.value = "";
+});
+
+/* ---- PDF ---- */
 $("pdf").onclick = () => {
   const { jsPDF } = window.jspdf;
   const doc = new jsPDF({ unit: "pt", format: "letter" });
-  const st = stats();
+  const v = valuation(), st = v.st, s = subject;
+  const saved = { v: 1, subject: { ...s }, cost: { costPerSqft: $("costPerSqft").value, deprRate: $("deprRate").value, assessRatio: $("assessRatio").value, landValue: $("landValue").value, landAuto, costAuto } };
+  doc.setProperties({ title: "Property Value Report", subject: s.address || "", keywords: TAG + b64enc(saved) });
   let y = 50;
-  doc.setFont("helvetica", "bold"); doc.setFontSize(18); doc.text("Comparable Sales Report", 40, y);
+  doc.setFont("helvetica", "bold"); doc.setFontSize(18); doc.text("Property Value Report", 40, y);
   y += 20; doc.setFont("helvetica", "normal"); doc.setFontSize(10);
   doc.text("Prepared " + new Date().toLocaleDateString(), 40, y);
   y += 28; doc.setFont("helvetica", "bold"); doc.setFontSize(12); doc.text("Subject Property", 40, y);
   doc.setFont("helvetica", "normal"); doc.setFontSize(10);
-  const s = subject;
   const found = s.foundation ? s.foundation + (s.foundationSqft ? ` (${num(s.foundationSqft)} sq ft)` : "") : "—";
   const rows = [
     ["Address", s.address], ["Sq ft", num(s.sqft)], ["Year built", s.yearBuilt || "—"], ["Bedrooms / Baths", `${s.beds ?? "—"} / ${s.baths ?? "—"}`],
@@ -204,26 +394,50 @@ $("pdf").onclick = () => {
   ];
   doc.autoTable({ startY: y + 6, body: rows, theme: "plain", styles: { fontSize: 10, cellPadding: 3 }, columnStyles: { 0: { fontStyle: "bold", cellWidth: 120 } }, margin: { left: 40, right: 40 } });
   y = doc.lastAutoTable.finalY + 20;
-  doc.setFont("helvetica", "bold"); doc.setFontSize(12); doc.text("Sold Comparables", 40, y);
-  doc.autoTable({
-    startY: y + 6,
-    head: [["#", "Address", "Sold date", "Sq ft", "Yr built", "Bd/Ba", "Garage", "Dist.", "Sold price"]],
-    body: comps.map((c, i) => [i + 1, c.address, (c.soldDate || "").slice(0, 10), num(c.sqft), c.yearBuilt ?? "—", `${c.beds ?? "—"}/${c.baths ?? "—"}`, c.garage ? (c.garageType || "Yes") : "No", c.miles + " mi", money(c.soldPrice)]),
-    styles: { fontSize: 9 }, headStyles: { fillColor: [31, 111, 74] }, margin: { left: 40, right: 40 },
-  });
-  y = doc.lastAutoTable.finalY + 24;
-  doc.setFont("helvetica", "bold"); doc.setFontSize(12); doc.text("Comparison", 40, y);
-  doc.setFont("helvetica", "normal"); doc.setFontSize(11);
-  const lines = [`Average sold price of ${st.n} comps: ${money(st.avg)}`];
-  if (st.ppsf && s.sqft) lines.push(`Avg $/sq ft: ${money(st.ppsf)}  |  Implied value at ${num(s.sqft)} sq ft: ${money(st.ppsf * s.sqft)}`);
-  if (s.ask && st.avg) {
-    const d = s.ask - st.avg;
-    lines.push(`Asking price ${money(s.ask)} is ${money(Math.abs(d))} (${Math.abs(d / st.avg * 100).toFixed(1)}%) ${d > 0 ? "above" : "below"} the comp average.`);
+
+  if (comps.length) {
+    doc.setFont("helvetica", "bold"); doc.setFontSize(12); doc.text("Sold Comparables", 40, y);
+    doc.setFont("helvetica", "normal"); doc.setFontSize(9); doc.text(searchNote(), 40, y + 13);
+    doc.autoTable({
+      startY: y + 20,
+      head: [["#", "Address", "Sold date", "Sq ft", "Yr built", "Bd/Ba", "Garage", "Dist.", "Sold price"]],
+      body: comps.map((c, i) => [i + 1, c.address, (c.soldDate || "").slice(0, 10), num(c.sqft), c.yearBuilt ?? "—", `${c.beds ?? "—"}/${c.baths ?? "—"}`, c.garage ? (c.garageType || "Yes") : "No", c.miles + " mi", money(c.soldPrice)]),
+      styles: { fontSize: 9 }, headStyles: { fillColor: [31, 111, 74] }, margin: { left: 40, right: 40 },
+    });
+    y = doc.lastAutoTable.finalY + 24;
   }
-  lines.forEach((l, i) => doc.text(l, 40, y + 18 + i * 16));
+
+  const lines = [];
+  doc.setFont("helvetica", "bold"); doc.setFontSize(12);
+  if (v.kind === "comps") {
+    doc.text("Comparison", 40, y);
+    lines.push(`Average sold price of ${st.n} comps: ${money(st.avg)}`);
+    if (st.ppsf && s.sqft) lines.push(`Avg $/sq ft: ${money(st.ppsf)}  |  Implied value at ${num(s.sqft)} sq ft: ${money(st.ppsf * s.sqft)}`);
+    const a = askLine(s.ask, st.avg, "comp average"); if (a) lines.push(a);
+  } else {
+    doc.text("Cost-Approach Estimate", 40, y);
+    lines.push(`Too few sold comps to average (${st.n} found), so value is estimated from replacement cost.`);
+    const ca = v.ca;
+    if (ca.missing) lines.push(`Not calculated: missing ${ca.missing.join(", ")}.`);
+    else {
+      lines.push(`Replacement cost new: ${money(ca.rcn)} (${num(s.sqft)} sq ft x ${money(ca.cps)} per sq ft)`);
+      lines.push(`Less depreciation: ${money(ca.deprAmt)} (${ca.age} yrs x ${(ca.rate * 100).toFixed(1)}% = ${(ca.depr * 100).toFixed(0)}%, capped at ${MAX_DEPR * 100}%)`);
+      lines.push(`Plus land/extras: ${money(ca.land)}${ca.land ? "" : " (none entered; building value only)"}`);
+      lines.push(`Estimated value: ${money(ca.value)}`);
+      const a = askLine(s.ask, ca.value, "cost-approach estimate"); if (a) lines.push(a);
+    }
+    if (costAuto) lines.push(`Build cost per sq ft is the published ${(s.state || "state").toUpperCase()} state average, not a local quote.`);
+    const ar = assessedRef(); if (ar) lines.push(ar);
+  }
+  doc.setFont("helvetica", "normal"); doc.setFontSize(11);
+  let ly = y + 18;
+  lines.forEach((l) => { const parts = doc.splitTextToSize(l, 530); doc.text(parts, 40, ly); ly += parts.length * 14 + 4; });
   doc.setFontSize(8); doc.setTextColor(120);
-  doc.text("Comps selected automatically by similarity (size, year built, beds/baths, garage, foundation, distance, recency). Not an appraisal.", 40, 760);
-  doc.save("comp-report-" + (s.address || "property").replace(/[^a-z0-9]+/gi, "-").slice(0, 40) + ".pdf");
+  const foot = v.kind === "comps"
+    ? "Comps selected automatically by similarity (size, year built, beds/baths, garage, foundation, distance, recency). Not an appraisal."
+    : "Cost approach uses the user-entered build cost per sq ft, depreciation rate and land value. It is an estimate, not an appraisal.";
+  doc.text(doc.splitTextToSize(foot, 530), 40, 750);
+  doc.save("value-report-" + (s.address || "property").replace(/[^a-z0-9]+/gi, "-").slice(0, 40) + ".pdf");
 };
 </script>
 </body>
