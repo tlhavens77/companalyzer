@@ -43,6 +43,7 @@
     <p class="msg" id="lookupMsg">Look-up fills the fields below. Anything missing or wrong, just type it in.</p>
     <div class="grid">
       <div><label>Sq ft</label><input id="sqft" type="number"></div>
+      <div><label>Year built</label><input id="yearBuilt" type="number" min="1700" max="2100"></div>
       <div><label>Bedrooms</label><input id="beds" type="number" step="1"></div>
       <div><label>Bathrooms</label><input id="baths" type="number" step="0.5"></div>
       <div><label>Roof type</label><input id="roof"></div>
@@ -93,6 +94,7 @@ function readSubject() {
     ...subject,
     address: $("address").value.trim(),
     sqft: +$("sqft").value || null,
+    yearBuilt: +$("yearBuilt").value || null,
     beds: $("beds").value === "" ? null : +$("beds").value,
     baths: $("baths").value === "" ? null : +$("baths").value,
     roofType: $("roof").value.trim(),
@@ -117,6 +119,7 @@ async function doLookup(overwrite) {
     lookedUpFor = $("address").value.trim();
     const fill = (id, v, empty) => { if (overwrite || $(id).value === empty) $(id).value = v; };
     fill("sqft", p.sqft || "", "");
+    fill("yearBuilt", p.yearBuilt || "", "");
     fill("beds", p.beds ?? "", "");
     fill("baths", p.baths ?? "", "");
     fill("roof", p.roofType || "", "");
@@ -166,8 +169,8 @@ function render() {
     html += `<br>Asking ${money(subject.ask)} is ${money(Math.abs(diff))} (${Math.abs(diff / st.avg * 100).toFixed(1)}%) ${diff > 0 ? "above" : "below"} the comp average.`;
   }
   $("summary").innerHTML = html;
-  $("compTable").innerHTML = `<tr><th>Address</th><th>Sold</th><th>Sq ft</th><th>Bd/Ba</th><th>Garage</th><th>Dist.</th><th>Sold price</th></tr>` +
-    comps.map((c, i) => `<tr><td>${c.address}</td><td>${(c.soldDate||"").slice(0,10)}</td><td>${num(c.sqft)}</td>
+  $("compTable").innerHTML = `<tr><th>Address</th><th>Sold</th><th>Sq ft</th><th>Yr built</th><th>Bd/Ba</th><th>Garage</th><th>Dist.</th><th>Sold price</th></tr>` +
+    comps.map((c, i) => `<tr><td>${c.address}</td><td>${(c.soldDate||"").slice(0,10)}</td><td>${num(c.sqft)}</td><td>${c.yearBuilt ?? "—"}</td>
       <td>${c.beds ?? "—"}/${c.baths ?? "—"}</td><td>${c.garage ? (c.garageType || "Yes") : "No"}</td><td>${c.miles} mi</td>
       <td><input type="number" value="${c.soldPrice || ""}" data-i="${i}" style="width:110px"></td></tr>`).join("");
   document.querySelectorAll("#compTable input").forEach(inp => inp.oninput = () => {
@@ -195,7 +198,7 @@ $("pdf").onclick = () => {
   const s = subject;
   const found = s.foundation ? s.foundation + (s.foundationSqft ? ` (${num(s.foundationSqft)} sq ft)` : "") : "—";
   const rows = [
-    ["Address", s.address], ["Sq ft", num(s.sqft)], ["Bedrooms / Baths", `${s.beds ?? "—"} / ${s.baths ?? "—"}`],
+    ["Address", s.address], ["Sq ft", num(s.sqft)], ["Year built", s.yearBuilt || "—"], ["Bedrooms / Baths", `${s.beds ?? "—"} / ${s.baths ?? "—"}`],
     ["Roof type", s.roofType || "—"], ["Basement / crawl", found],
     ["Garage", s.garage ? (s.garageType || "Yes") : "No garage"], ["Asking price", money(s.ask)],
   ];
@@ -204,8 +207,8 @@ $("pdf").onclick = () => {
   doc.setFont("helvetica", "bold"); doc.setFontSize(12); doc.text("Sold Comparables", 40, y);
   doc.autoTable({
     startY: y + 6,
-    head: [["#", "Address", "Sold date", "Sq ft", "Bd/Ba", "Garage", "Dist.", "Sold price"]],
-    body: comps.map((c, i) => [i + 1, c.address, (c.soldDate || "").slice(0, 10), num(c.sqft), `${c.beds ?? "—"}/${c.baths ?? "—"}`, c.garage ? (c.garageType || "Yes") : "No", c.miles + " mi", money(c.soldPrice)]),
+    head: [["#", "Address", "Sold date", "Sq ft", "Yr built", "Bd/Ba", "Garage", "Dist.", "Sold price"]],
+    body: comps.map((c, i) => [i + 1, c.address, (c.soldDate || "").slice(0, 10), num(c.sqft), c.yearBuilt ?? "—", `${c.beds ?? "—"}/${c.baths ?? "—"}`, c.garage ? (c.garageType || "Yes") : "No", c.miles + " mi", money(c.soldPrice)]),
     styles: { fontSize: 9 }, headStyles: { fillColor: [31, 111, 74] }, margin: { left: 40, right: 40 },
   });
   y = doc.lastAutoTable.finalY + 24;
@@ -219,7 +222,7 @@ $("pdf").onclick = () => {
   }
   lines.forEach((l, i) => doc.text(l, 40, y + 18 + i * 16));
   doc.setFontSize(8); doc.setTextColor(120);
-  doc.text("Comps selected automatically by similarity (size, beds/baths, garage, foundation, distance, recency). Not an appraisal.", 40, 760);
+  doc.text("Comps selected automatically by similarity (size, year built, beds/baths, garage, foundation, distance, recency). Not an appraisal.", 40, 760);
   doc.save("comp-report-" + (s.address || "property").replace(/[^a-z0-9]+/gi, "-").slice(0, 40) + ".pdf");
 };
 </script>
