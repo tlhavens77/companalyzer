@@ -47,6 +47,7 @@ function normalize(p) {
 function score(subject, c, miles) {
   let s = 0;
   if (subject.sqft && c.sqft) s += Math.min(Math.abs(subject.sqft - c.sqft) / subject.sqft, 1) * 40;
+  if (subject.yearBuilt && c.yearBuilt) s += Math.min(Math.abs(subject.yearBuilt - c.yearBuilt), 50) * 0.4;
   if (subject.beds != null && c.beds != null) s += Math.abs(subject.beds - c.beds) * 8;
   if (subject.baths != null && c.baths != null) s += Math.abs(subject.baths - c.baths) * 6;
   if (subject.garage !== undefined && !!subject.garage !== !!c.garage) s += 10;
