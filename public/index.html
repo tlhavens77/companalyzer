@@ -1,0 +1,227 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Comp Report Builder</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
+<style>
+  :root { --bg:#f6f7f9; --card:#fff; --ink:#1b2430; --muted:#667085; --line:#e3e6eb; --accent:#1f6f4a; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#14181d; --card:#1c222a; --ink:#e8ecf1; --muted:#9aa5b4; --line:#2c3440; --accent:#3fb37f; } }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink); font-family:Calibri, Carlito, system-ui, sans-serif; font-size:16px; }
+  main { max-width:900px; margin:0 auto; padding:16px; }
+  h1 { font-size:1.4rem; margin:8px 0 16px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:16px; margin-bottom:16px; }
+  .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:12px; }
+  label { display:block; font-size:.8rem; color:var(--muted); margin-bottom:4px; }
+  input, select { width:100%; padding:9px; border:1px solid var(--line); border-radius:6px; background:var(--bg); color:var(--ink); font:inherit; }
+  button { padding:10px 16px; border:0; border-radius:6px; background:var(--accent); color:#fff; font:inherit; cursor:pointer; }
+  button.secondary { background:transparent; color:var(--ink); border:1px solid var(--line); }
+  button:disabled { opacity:.5; cursor:wait; }
+  .row { display:flex; gap:8px; flex-wrap:wrap; align-items:end; }
+  .row > .grow { flex:1; min-width:220px; }
+  table { width:100%; border-collapse:collapse; font-size:.9rem; }
+  th, td { text-align:left; padding:8px 6px; border-bottom:1px solid var(--line); }
+  td input { padding:5px; }
+  .summary { font-size:1.05rem; line-height:1.6; }
+  .msg { color:var(--muted); margin:8px 0; }
+  .err { color:#c0392b; }
+  .scroll { overflow-x:auto; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Comp Report Builder</h1>
+
+  <div class="card">
+    <div class="row">
+      <div class="grow"><label>Property address</label><input id="address" placeholder="123 Main St, Springfield, MO 65801"></div>
+      <button id="lookup">Look up</button>
+    </div>
+    <p class="msg" id="lookupMsg">Look-up fills the fields below. Anything missing or wrong, just type it in.</p>
+    <div class="grid">
+      <div><label>Sq ft</label><input id="sqft" type="number"></div>
+      <div><label>Bedrooms</label><input id="beds" type="number" step="1"></div>
+      <div><label>Bathrooms</label><input id="baths" type="number" step="0.5"></div>
+      <div><label>Roof type</label><input id="roof"></div>
+      <div><label>Basement / crawl space</label>
+        <select id="foundation"><option value="">Unknown</option><option>Basement</option><option>Crawl Space</option><option>Slab</option></select></div>
+      <div><label>Basement / crawl sq ft</label><input id="foundationSqft" type="number"></div>
+      <div><label>Garage</label><select id="garage"><option value="no">No garage</option><option value="yes">Garage</option></select></div>
+      <div><label>Garage type</label>
+        <select id="garageType"><option value="">n/a</option><option>Attached</option><option>Detached</option><option>Carport</option></select></div>
+      <div><label>Asking price (optional)</label><input id="ask" type="number"></div>
+    </div>
+    <div class="row" style="margin-top:14px">
+      <button id="findComps">Find 5 comps</button>
+    </div>
+  </div>
+
+  <div class="card" id="results" hidden>
+    <div class="summary" id="summary"></div>
+    <div class="scroll"><table id="compTable"></table></div>
+    <p class="msg">Sold prices are editable. If a comp looks wrong, fix its price or clear the row, and the average updates.</p>
+    <div class="row"><button id="pdf">Download PDF</button></div>
+  </div>
+  <p class="msg err" id="err"></p>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let subject = {}, comps = [];
+
+const money = (n) => (n == null || isNaN(n)) ? "—" : "$" + Math.round(n).toLocaleString();
+const num = (n) => (n == null || n === "") ? "—" : Number(n).toLocaleString();
+
+async function api(body) {
+  let r;
+  try { r = await fetch("/api/comps", { method: "POST", body: JSON.stringify(body) }); }
+  catch (e) { throw new Error("Could not reach the server. Check your connection."); }
+  const text = await r.text();
+  let j = null;
+  try { j = text ? JSON.parse(text) : null; } catch (e) {}
+  if (!j) throw new Error(`The lookup service did not respond correctly (status ${r.status}). The /api/comps function is probably not deployed or the RENTCAST_API_KEY secret is missing.`);
+  if (!r.ok) throw new Error(j.error || "Request failed");
+  return j;
+}
+
+function readSubject() {
+  const gType = $("garage").value === "yes" ? $("garageType").value : "";
+  return {
+    ...subject,
+    address: $("address").value.trim(),
+    sqft: +$("sqft").value || null,
+    beds: $("beds").value === "" ? null : +$("beds").value,
+    baths: $("baths").value === "" ? null : +$("baths").value,
+    roofType: $("roof").value.trim(),
+    foundation: $("foundation").value,
+    foundationSqft: +$("foundationSqft").value || null,
+    garage: $("garage").value === "yes",
+    garageType: gType,
+    ask: +$("ask").value || null,
+  };
+}
+
+let lookedUpFor = "", busy = false;
+async function doLookup(overwrite) {
+  const address = $("address").value.trim();
+  if (!address || busy) return;
+  busy = true; $("err").textContent = "";
+  $("lookup").disabled = true; $("lookupMsg").textContent = "Looking up…";
+  try {
+    const p = await api({ action: "lookup", address });
+    subject = p;
+    $("address").value = p.address || address;
+    lookedUpFor = $("address").value.trim();
+    const fill = (id, v, empty) => { if (overwrite || $(id).value === empty) $(id).value = v; };
+    fill("sqft", p.sqft || "", "");
+    fill("beds", p.beds ?? "", "");
+    fill("baths", p.baths ?? "", "");
+    fill("roof", p.roofType || "", "");
+    const f = (p.foundation || "").toLowerCase();
+    fill("foundation", f.includes("base") ? "Basement" : f.includes("crawl") ? "Crawl Space" : f.includes("slab") ? "Slab" : "", "");
+    fill("garage", p.garage ? "yes" : "no", "no");
+    fill("garageType", ["Attached","Detached","Carport"].find(t => (p.garageType||"").toLowerCase().includes(t.toLowerCase())) || "", "");
+    $("lookupMsg").textContent = "Found. Check the fields and fill in anything missing (basement size is usually not in public data).";
+  } catch (e) { $("lookupMsg").textContent = ""; $("err").textContent = e.message; }
+  $("lookup").disabled = false; busy = false;
+}
+$("lookup").onclick = () => doLookup(true);
+$("address").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); doLookup(false); } });
+$("address").addEventListener("change", () => { const a = $("address").value.trim(); if (a && a !== lookedUpFor) doLookup(false); });
+
+$("findComps").onclick = async () => {
+  $("err").textContent = "";
+  if ($("address").value.trim() && $("address").value.trim() !== lookedUpFor) await doLookup(false);
+  const s = readSubject();
+  if (!s.address) { $("err").textContent = "Enter an address."; return; }
+  $("findComps").disabled = true; $("findComps").textContent = "Searching…";
+  try {
+    const r = await api({ action: "comps", subject: s });
+    subject = s; comps = r.comps;
+    if (!comps.length) $("err").textContent = "No recent sold comps found nearby.";
+    render();
+  } catch (e) { $("err").textContent = e.message; }
+  $("findComps").disabled = false; $("findComps").textContent = "Find 5 comps";
+};
+
+function stats() {
+  const prices = comps.map(c => +c.soldPrice).filter(Boolean);
+  const avg = prices.length ? prices.reduce((a,b)=>a+b,0)/prices.length : null;
+  const ppsfVals = comps.filter(c => c.soldPrice && c.sqft).map(c => c.soldPrice / c.sqft);
+  const ppsf = ppsfVals.length ? ppsfVals.reduce((a,b)=>a+b,0)/ppsfVals.length : null;
+  return { avg, n: prices.length, ppsf };
+}
+
+function render() {
+  if (!comps.length) { $("results").hidden = true; return; }
+  $("results").hidden = false;
+  const st = stats();
+  let html = `<b>Average sold price (${st.n} comps): ${money(st.avg)}</b>`;
+  if (st.ppsf && subject.sqft) html += `<br>Avg $/sq ft: ${money(st.ppsf)} → implied value at ${num(subject.sqft)} sq ft: ${money(st.ppsf * subject.sqft)}`;
+  if (subject.ask && st.avg) {
+    const diff = subject.ask - st.avg;
+    html += `<br>Asking ${money(subject.ask)} is ${money(Math.abs(diff))} (${Math.abs(diff / st.avg * 100).toFixed(1)}%) ${diff > 0 ? "above" : "below"} the comp average.`;
+  }
+  $("summary").innerHTML = html;
+  $("compTable").innerHTML = `<tr><th>Address</th><th>Sold</th><th>Sq ft</th><th>Bd/Ba</th><th>Garage</th><th>Dist.</th><th>Sold price</th></tr>` +
+    comps.map((c, i) => `<tr><td>${c.address}</td><td>${(c.soldDate||"").slice(0,10)}</td><td>${num(c.sqft)}</td>
+      <td>${c.beds ?? "—"}/${c.baths ?? "—"}</td><td>${c.garage ? (c.garageType || "Yes") : "No"}</td><td>${c.miles} mi</td>
+      <td><input type="number" value="${c.soldPrice || ""}" data-i="${i}" style="width:110px"></td></tr>`).join("");
+  document.querySelectorAll("#compTable input").forEach(inp => inp.oninput = () => {
+    comps[+inp.dataset.i].soldPrice = +inp.value || null;
+    const s2 = stats();
+    renderSummaryOnly();
+  });
+}
+function renderSummaryOnly() {
+  const keep = [...document.querySelectorAll("#compTable input")].map(i => i.value);
+  render();
+  document.querySelectorAll("#compTable input").forEach((inp, i) => inp.value = keep[i]);
+}
+
+$("pdf").onclick = () => {
+  const { jsPDF } = window.jspdf;
+  const doc = new jsPDF({ unit: "pt", format: "letter" });
+  const st = stats();
+  let y = 50;
+  doc.setFont("helvetica", "bold"); doc.setFontSize(18); doc.text("Comparable Sales Report", 40, y);
+  y += 20; doc.setFont("helvetica", "normal"); doc.setFontSize(10);
+  doc.text("Prepared " + new Date().toLocaleDateString(), 40, y);
+  y += 28; doc.setFont("helvetica", "bold"); doc.setFontSize(12); doc.text("Subject Property", 40, y);
+  doc.setFont("helvetica", "normal"); doc.setFontSize(10);
+  const s = subject;
+  const found = s.foundation ? s.foundation + (s.foundationSqft ? ` (${num(s.foundationSqft)} sq ft)` : "") : "—";
+  const rows = [
+    ["Address", s.address], ["Sq ft", num(s.sqft)], ["Bedrooms / Baths", `${s.beds ?? "—"} / ${s.baths ?? "—"}`],
+    ["Roof type", s.roofType || "—"], ["Basement / crawl", found],
+    ["Garage", s.garage ? (s.garageType || "Yes") : "No garage"], ["Asking price", money(s.ask)],
+  ];
+  doc.autoTable({ startY: y + 6, body: rows, theme: "plain", styles: { fontSize: 10, cellPadding: 3 }, columnStyles: { 0: { fontStyle: "bold", cellWidth: 120 } }, margin: { left: 40, right: 40 } });
+  y = doc.lastAutoTable.finalY + 20;
+  doc.setFont("helvetica", "bold"); doc.setFontSize(12); doc.text("Sold Comparables", 40, y);
+  doc.autoTable({
+    startY: y + 6,
+    head: [["#", "Address", "Sold date", "Sq ft", "Bd/Ba", "Garage", "Dist.", "Sold price"]],
+    body: comps.map((c, i) => [i + 1, c.address, (c.soldDate || "").slice(0, 10), num(c.sqft), `${c.beds ?? "—"}/${c.baths ?? "—"}`, c.garage ? (c.garageType || "Yes") : "No", c.miles + " mi", money(c.soldPrice)]),
+    styles: { fontSize: 9 }, headStyles: { fillColor: [31, 111, 74] }, margin: { left: 40, right: 40 },
+  });
+  y = doc.lastAutoTable.finalY + 24;
+  doc.setFont("helvetica", "bold"); doc.setFontSize(12); doc.text("Comparison", 40, y);
+  doc.setFont("helvetica", "normal"); doc.setFontSize(11);
+  const lines = [`Average sold price of ${st.n} comps: ${money(st.avg)}`];
+  if (st.ppsf && s.sqft) lines.push(`Avg $/sq ft: ${money(st.ppsf)}  |  Implied value at ${num(s.sqft)} sq ft: ${money(st.ppsf * s.sqft)}`);
+  if (s.ask && st.avg) {
+    const d = s.ask - st.avg;
+    lines.push(`Asking price ${money(s.ask)} is ${money(Math.abs(d))} (${Math.abs(d / st.avg * 100).toFixed(1)}%) ${d > 0 ? "above" : "below"} the comp average.`);
+  }
+  lines.forEach((l, i) => doc.text(l, 40, y + 18 + i * 16));
+  doc.setFontSize(8); doc.setTextColor(120);
+  doc.text("Comps selected automatically by similarity (size, beds/baths, garage, foundation, distance, recency). Not an appraisal.", 40, 760);
+  doc.save("comp-report-" + (s.address || "property").replace(/[^a-z0-9]+/gi, "-").slice(0, 40) + ".pdf");
+};
+</script>
+</body>
+</html>
