@@ -1,7 +1,10 @@
-// Netlify function: property lookup + sold-comp selection via RentCast.
-// Set RENTCAST_API_KEY in Netlify > Site settings > Environment variables.
+// Cloudflare Worker: property lookup + sold-comp selection via RentCast.
+// Secret required: RENTCAST_API_KEY (Worker > Settings > Variables and Secrets).
 
 const BASE = "https://api.rentcast.io/v1";
+const WINDOWS = [12, 24, 36, 60]; // months, tried in order
+const RADII = [1, 3, 5];          // miles, tried in order within each window
+const MONTH_MS = 1000 * 60 * 60 * 24 * 30.44;
 
 async function rc(env, path, params) {
   const url = new URL(BASE + path);
@@ -25,7 +28,14 @@ function milesBetween(lat1, lon1, lat2, lon2) {
 
 function normalize(p) {
   const f = p.features || {};
+  const ta = p.taxAssessments || {};
+  const taYears = Object.keys(ta).sort();
+  const lastTa = taYears.length ? ta[taYears[taYears.length - 1]] : null;
   return {
+    state: p.state || "",
+    assessedLand: lastTa && lastTa.land != null ? lastTa.land : null,
+    assessedImprovements: lastTa && lastTa.improvements != null ? lastTa.improvements : null,
+    assessedYear: lastTa ? (lastTa.year || +taYears[taYears.length - 1]) : null,
     address: p.formattedAddress || p.addressLine1,
     latitude: p.latitude,
     longitude: p.longitude,
@@ -55,10 +65,7 @@ function score(subject, c, miles) {
   if (subject.foundation && c.foundation && subject.foundation.toLowerCase() !== c.foundation.toLowerCase()) s += 6;
   if (subject.roofType && c.roofType && subject.roofType.toLowerCase() !== c.roofType.toLowerCase()) s += 2;
   s += miles * 5;
-  if (c.soldDate) {
-    const months = (Date.now() - new Date(c.soldDate)) / (1000 * 60 * 60 * 24 * 30);
-    s += months * 1.5;
-  }
+  if (c.soldDate) s += ((Date.now() - new Date(c.soldDate)) / MONTH_MS) * 1.5;
   return s;
 }
 
@@ -85,26 +92,55 @@ async function handleComps(request, env) {
         lat = look[0].latitude; lon = look[0].longitude;
         subject.propertyType = subject.propertyType || look[0].propertyType;
       }
-      const cutoff = Date.now() - 365 * 24 * 60 * 60 * 1000;
-      let ranked = [];
-      for (const radius of [1, 3, 5]) {
-        const props = await rc(env, "/properties", {
-          latitude: lat, longitude: lon, radius,
-          propertyType: subject.propertyType,
-          limit: 500,
-        });
-        ranked = props
-          .map(normalize)
-          .filter((c) => c.soldPrice && c.soldDate && new Date(c.soldDate).getTime() >= cutoff &&
-            c.address && c.address.toLowerCase() !== (subject.address || "").toLowerCase())
-          .map((c) => {
-            const miles = milesBetween(lat, lon, c.latitude, c.longitude);
-            return { ...c, miles: Math.round(miles * 100) / 100, _score: score(subject, c, miles) };
-          })
-          .sort((a, b) => a._score - b._score);
-        if (ranked.length >= 5) break;
+
+      // Each radius is fetched at most once (max 3 API requests), then re-filtered per time window.
+      const cache = {};
+      const getProps = async (radius) => {
+        if (!cache[radius]) {
+          cache[radius] = (await rc(env, "/properties", {
+            latitude: lat, longitude: lon, radius,
+            propertyType: subject.propertyType, limit: 500,
+          })).map(normalize);
+        }
+        return cache[radius];
+      };
+
+      const subjAddr = (subject.address || "").toLowerCase();
+      let ranked = [], usedMonths = WINDOWS[0], usedRadius = RADII[0], all = [];
+      outer:
+      for (const months of WINDOWS) {
+        const cutoff = Date.now() - months * MONTH_MS;
+        for (const radius of RADII) {
+          all = await getProps(radius);
+          ranked = all
+            .filter((c) => c.soldPrice && c.soldDate && c.latitude != null && c.longitude != null &&
+              new Date(c.soldDate).getTime() >= cutoff &&
+              c.address && c.address.toLowerCase() !== subjAddr)
+            .map((c) => {
+              const miles = milesBetween(lat, lon, c.latitude, c.longitude);
+              return { ...c, miles: Math.round(miles * 100) / 100, _score: score(subject, c, miles) };
+            })
+            .sort((a, b) => a._score - b._score);
+          usedMonths = months; usedRadius = radius;
+          if (ranked.length >= 5) break outer;
+        }
       }
-      return json(200, { comps: ranked.slice(0, 5).map(({ _score, ...c }) => c) });
+
+      const comps = ranked.slice(0, 5).map(({ _score, ...c }) => ({
+        ...c,
+        ageMonths: Math.round((Date.now() - new Date(c.soldDate)) / MONTH_MS),
+      }));
+      return json(200, {
+        comps,
+        searchedMonths: usedMonths,
+        searchedRadius: usedRadius,
+        diag: {
+          properties: all.length,
+          withSalePrice: all.filter((c) => c.soldPrice && c.soldDate).length,
+          inWindow: ranked.length,
+          radiusMiles: usedRadius,
+        },
+      });
     }
 
     return json(400, { error: "Unknown action" });
