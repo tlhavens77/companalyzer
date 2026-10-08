@@ -69,6 +69,18 @@ function score(subject, c, miles) {
   return s;
 }
 
+const addrKey = (a) => String(a || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+// Days on market from a RentCast sale listing: use its own figure, else derive from the listing dates.
+function domOf(l) {
+  if (!l) return null;
+  if (l.daysOnMarket != null) return Math.round(l.daysOnMarket);
+  if (!l.listedDate) return null;
+  const end = l.removedDate ? new Date(l.removedDate) : (l.status === "Active" ? new Date() : null);
+  if (!end) return null;
+  const d = Math.round((end - new Date(l.listedDate)) / 86400000);
+  return d >= 0 ? d : null;
+}
+
 const json = (code, body) =>
   new Response(JSON.stringify(body), { status: code, headers: { "Content-Type": "application/json" } });
 
@@ -80,7 +92,11 @@ async function handleComps(request, env) {
     if (body.action === "lookup") {
       const data = await rc(env, "/properties", { address: body.address });
       if (!data.length) return json(404, { error: "Address not found" });
-      return json(200, normalize(data[0]));
+      const prop = normalize(data[0]);
+      // Days on market is only known if the property is (or was) listed; failure here must not break the lookup.
+      const live = await rc(env, "/listings/sale", { address: prop.address, status: "Active", limit: 1 }).catch(() => []);
+      prop.daysOnMarket = Array.isArray(live) ? domOf(live[0]) : null;
+      return json(200, prop);
     }
 
     if (body.action === "comps") {
@@ -126,8 +142,20 @@ async function handleComps(request, env) {
         }
       }
 
+      // One extra request: past listings around the subject, matched to the comps by address.
+      const domMap = {};
+      if (ranked.length) {
+        try {
+          const ls = await rc(env, "/listings/sale", { latitude: lat, longitude: lon, radius: usedRadius, status: "Inactive", limit: 500 });
+          for (const l of ls) {
+            const k = addrKey(l.formattedAddress || l.addressLine1);
+            if (k && !(k in domMap)) domMap[k] = domOf(l); // newest listing first
+          }
+        } catch (e) {}
+      }
       const comps = ranked.slice(0, 5).map(({ _score, ...c }) => ({
         ...c,
+        daysOnMarket: domMap[addrKey(c.address)] ?? null,
         ageMonths: Math.round((Date.now() - new Date(c.soldDate)) / MONTH_MS),
       }));
       return json(200, {
