@@ -50,6 +50,7 @@
     <div class="grid">
       <div><label>Sq ft</label><input id="sqft" type="number"></div>
       <div><label>Year built</label><input id="yearBuilt" type="number" min="1700" max="2100"></div>
+      <div><label>Days on market</label><input id="dom" type="number" min="0"></div>
       <div><label>Bedrooms</label><input id="beds" type="number" step="1"></div>
       <div><label>Bathrooms</label><input id="baths" type="number" step="0.5"></div>
       <div><label>Roof type</label><input id="roof"></div>
@@ -121,6 +122,7 @@ function readSubject() {
     address: $("address").value.trim(),
     sqft: +$("sqft").value || null,
     yearBuilt: +$("yearBuilt").value || null,
+    daysOnMarket: $("dom").value === "" ? null : +$("dom").value,
     beds: $("beds").value === "" ? null : +$("beds").value,
     baths: $("baths").value === "" ? null : +$("baths").value,
     roofType: $("roof").value.trim(),
@@ -183,6 +185,7 @@ async function doLookup(overwrite) {
     const fill = (id, v, empty) => { if (overwrite || $(id).value === empty) $(id).value = v; };
     fill("sqft", p.sqft || "", "");
     fill("yearBuilt", p.yearBuilt || "", "");
+    fill("dom", p.daysOnMarket ?? "", "");
     fill("beds", p.beds ?? "", "");
     fill("baths", p.baths ?? "", "");
     fill("roof", p.roofType || "", "");
@@ -224,6 +227,11 @@ function stats() {
   const ppsfVals = comps.filter(c => c.soldPrice && c.sqft).map(c => c.soldPrice / c.sqft);
   const ppsf = ppsfVals.length ? ppsfVals.reduce((a,b)=>a+b,0)/ppsfVals.length : null;
   return { avg, n: prices.length, ppsf };
+}
+
+function avgDom() {
+  const d = comps.map(c => c.daysOnMarket).filter(x => x != null);
+  return d.length ? Math.round(d.reduce((a, b) => a + b, 0) / d.length) : null;
 }
 
 function costApproach(s) {
@@ -275,6 +283,7 @@ function render() {
     html += `<b>Average sold price (${st.n} comps): ${money(st.avg)}</b>`;
     if (st.ppsf && subject.sqft) html += `<br>Avg $/sq ft: ${money(st.ppsf)} → implied value at ${num(subject.sqft)} sq ft: ${money(st.ppsf * subject.sqft)}`;
     const a = askLine(subject.ask, st.avg, "comp average"); if (a) html += `<br>${a}`;
+    const dm = avgDom(); if (dm != null) html += `<br>Avg days on market of comps: ${dm}${subject.daysOnMarket != null ? " | this property: " + subject.daysOnMarket : ""}`;
     html += `<br><span class="msg">${searchNote()}</span>`;
   } else {
     html += `<b>Not enough sold comps to average (${st.n} found).</b><br><span class="msg">${searchNote()} ${diagText()}</span><br>`;
@@ -294,8 +303,8 @@ function render() {
 
   $("tableWrap").hidden = !comps.length; $("tableNote").hidden = !comps.length;
   if (comps.length) {
-    $("compTable").innerHTML = `<tr><th>Address</th><th>Sold</th><th>Sq ft</th><th>Yr built</th><th>Bd/Ba</th><th>Garage</th><th>Dist.</th><th>Sold price</th></tr>` +
-      comps.map((c, i) => `<tr><td>${c.address}</td><td>${(c.soldDate||"").slice(0,10)}</td><td>${num(c.sqft)}</td><td>${c.yearBuilt ?? "—"}</td>
+    $("compTable").innerHTML = `<tr><th>Address</th><th>Sold</th><th>DOM</th><th>Sq ft</th><th>Yr built</th><th>Bd/Ba</th><th>Garage</th><th>Dist.</th><th>Sold price</th></tr>` +
+      comps.map((c, i) => `<tr><td>${c.address}</td><td>${(c.soldDate||"").slice(0,10)}</td><td>${c.daysOnMarket ?? "—"}</td><td>${num(c.sqft)}</td><td>${c.yearBuilt ?? "—"}</td>
         <td>${c.beds ?? "—"}/${c.baths ?? "—"}</td><td>${c.garage ? (c.garageType || "Yes") : "No"}</td><td>${c.miles} mi</td>
         <td><input type="number" value="${c.soldPrice || ""}" data-i="${i}" style="width:110px"></td></tr>`).join("");
     document.querySelectorAll("#compTable input").forEach(inp => inp.oninput = () => {
@@ -326,7 +335,7 @@ async function parseReportText(pdf) {
   const g = get("Garage");
   const roof = get("Roof type");
   return { v: 0, subject: {
-    address, sqft: n(get("Sq ft")), yearBuilt: n(get("Year built")), beds: bb[0] ?? null, baths: bb[1] ?? null,
+    address, sqft: n(get("Sq ft")), yearBuilt: n(get("Year built")), daysOnMarket: n(get("Days on market")), beds: bb[0] ?? null, baths: bb[1] ?? null,
     roofType: roof === "—" ? "" : roof, foundation: fm || "", foundationSqft: fs ? n(fs[1]) : null,
     garage: !!g && g !== "No garage" && g !== "—", garageType: ["Attached", "Detached", "Carport"].includes(g) ? g : "",
     ask: n(get("Asking price")),
@@ -336,7 +345,7 @@ async function parseReportText(pdf) {
 function applyLoaded(d) {
   const s = d.subject || {}, c = d.cost || {};
   const set = (id, v) => { $(id).value = v == null ? "" : v; };
-  set("address", s.address); set("sqft", s.sqft); set("yearBuilt", s.yearBuilt); set("beds", s.beds); set("baths", s.baths);
+  set("address", s.address); set("sqft", s.sqft); set("yearBuilt", s.yearBuilt); set("dom", s.daysOnMarket); set("beds", s.beds); set("baths", s.baths);
   set("roof", s.roofType); set("foundationSqft", s.foundationSqft); set("ask", s.ask);
   $("foundation").value = ["Basement", "Crawl Space", "Slab"].includes(s.foundation) ? s.foundation : "";
   $("garage").value = s.garage ? "yes" : "no";
@@ -388,7 +397,7 @@ $("pdf").onclick = () => {
   doc.setFont("helvetica", "normal"); doc.setFontSize(10);
   const found = s.foundation ? s.foundation + (s.foundationSqft ? ` (${num(s.foundationSqft)} sq ft)` : "") : "—";
   const rows = [
-    ["Address", s.address], ["Sq ft", num(s.sqft)], ["Year built", s.yearBuilt || "—"], ["Bedrooms / Baths", `${s.beds ?? "—"} / ${s.baths ?? "—"}`],
+    ["Address", s.address], ["Sq ft", num(s.sqft)], ["Year built", s.yearBuilt || "—"], ["Days on market", s.daysOnMarket ?? "—"], ["Bedrooms / Baths", `${s.beds ?? "—"} / ${s.baths ?? "—"}`],
     ["Roof type", s.roofType || "—"], ["Basement / crawl", found],
     ["Garage", s.garage ? (s.garageType || "Yes") : "No garage"], ["Asking price", money(s.ask)],
   ];
@@ -400,8 +409,8 @@ $("pdf").onclick = () => {
     doc.setFont("helvetica", "normal"); doc.setFontSize(9); doc.text(searchNote(), 40, y + 13);
     doc.autoTable({
       startY: y + 20,
-      head: [["#", "Address", "Sold date", "Sq ft", "Yr built", "Bd/Ba", "Garage", "Dist.", "Sold price"]],
-      body: comps.map((c, i) => [i + 1, c.address, (c.soldDate || "").slice(0, 10), num(c.sqft), c.yearBuilt ?? "—", `${c.beds ?? "—"}/${c.baths ?? "—"}`, c.garage ? (c.garageType || "Yes") : "No", c.miles + " mi", money(c.soldPrice)]),
+      head: [["#", "Address", "Sold date", "DOM", "Sq ft", "Yr built", "Bd/Ba", "Garage", "Dist.", "Sold price"]],
+      body: comps.map((c, i) => [i + 1, c.address, (c.soldDate || "").slice(0, 10), c.daysOnMarket ?? "—", num(c.sqft), c.yearBuilt ?? "—", `${c.beds ?? "—"}/${c.baths ?? "—"}`, c.garage ? (c.garageType || "Yes") : "No", c.miles + " mi", money(c.soldPrice)]),
       styles: { fontSize: 9 }, headStyles: { fillColor: [31, 111, 74] }, margin: { left: 40, right: 40 },
     });
     y = doc.lastAutoTable.finalY + 24;
@@ -413,6 +422,7 @@ $("pdf").onclick = () => {
     doc.text("Comparison", 40, y);
     lines.push(`Average sold price of ${st.n} comps: ${money(st.avg)}`);
     if (st.ppsf && s.sqft) lines.push(`Avg $/sq ft: ${money(st.ppsf)}  |  Implied value at ${num(s.sqft)} sq ft: ${money(st.ppsf * s.sqft)}`);
+    const dm = avgDom(); if (dm != null) lines.push(`Avg days on market of comps: ${dm}${s.daysOnMarket != null ? "  |  This property: " + s.daysOnMarket : ""}`);
     const a = askLine(s.ask, st.avg, "comp average"); if (a) lines.push(a);
   } else {
     doc.text("Cost-Approach Estimate", 40, y);
